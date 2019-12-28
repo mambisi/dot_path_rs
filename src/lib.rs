@@ -128,6 +128,7 @@ impl DotPaths for serde_json::Value {
         match self {
             Value::Array(vec) => vec.dot_get(path),
             Value::Object(map) => map.dot_get(path),
+            Value::Null => None,
             _ => {
                 if path.is_empty() {
                     serde_json::from_value(self.to_owned()).ok()
@@ -142,6 +143,7 @@ impl DotPaths for serde_json::Value {
         match self {
             Value::Array(vec) => vec.dot_get_mut(path),
             Value::Object(map) => map.dot_get_mut(path),
+            Value::Null => None,
             _ => {
                 if path.is_empty() {
                     Some(self)
@@ -227,6 +229,10 @@ fn new_by_path_root<T>(path: &str, value: T) -> Value
 where
     T: Serialize,
 {
+    if path.is_empty() {
+        return serde_json::to_value(value).expect("Serialize error");
+    }
+
     let (sub1, _) = path_split(path);
     if sub1 == "0" || sub1 == "+" || sub1 == "<" || sub1 == ">" {
         // new vec
@@ -546,6 +552,31 @@ mod tests {
     fn cant_get_scalar_with_path() {
         let value = Value::String("Hello".to_string());
         let _ = value.dot_get::<Value>("1.2.3");
+    }
+
+    #[test]
+    fn set_null() {
+        let mut item = Value::Null;
+        item.dot_set("", "foo");
+        assert_eq!(Value::String("foo".into()), item);
+    }
+
+    #[test]
+    fn replace_null() {
+        let mut item = Value::Null;
+        assert_eq!(None, item.dot_replace::<_, Value>("", "foo"));
+        assert_eq!(Value::String("foo".into()), item);
+    }
+
+    #[test]
+    fn take_null() {
+        let mut item = Value::Null;
+        assert_eq!(None, item.dot_take::<Value>(""));
+        assert_eq!(Value::Null, item);
+
+        let mut item = Value::Bool(true);
+        assert_eq!(Some(true), item.dot_take::<bool>(""));
+        assert_eq!(Value::Null, item);
     }
 
     #[test]
