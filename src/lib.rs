@@ -4,6 +4,7 @@ use serde_json::{Map, Value};
 use std::cmp::Ordering;
 use std::mem;
 
+#[cfg(test)]
 #[macro_use] extern crate serde_derive;
 
 /// Access and mutate nested JSON elements by dotted paths
@@ -542,7 +543,6 @@ mod tests {
     use crate::DotPaths;
     use serde_json::json;
     use serde_json::Value;
-    use serde::{Serialize,Deserialize};
 
     #[test]
     fn get_scalar_with_empty_path() {
