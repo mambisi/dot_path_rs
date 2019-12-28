@@ -3,8 +3,14 @@ name = "json_dotpath"
 version = "0.1.0"
 authors = ["Ondřej Hruška <ondra@ondrovo.com>"]
 edition = "2018"
-
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+license = "MIT"
+description = "Dotted path access to nested JSON objects (serde_json::Value)"
+repository = "https://git.ondrovo.com/packages/json_dotpath"
+readme = "README.md"
+keywords = ["serde", "json", "dot"]
+categories = [
+    "data-structures"
+]
 
 [dependencies]
 serde = "1"

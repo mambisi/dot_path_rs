@@ -4,6 +4,8 @@ use serde_json::{Map, Value};
 use std::cmp::Ordering;
 use std::mem;
 
+#[macro_use] extern crate serde_derive;
+
 /// Access and mutate nested JSON elements by dotted paths
 ///
 /// The path is composed of keys separated by dots, e.g. `foo.bar.1`.
@@ -540,6 +542,7 @@ mod tests {
     use crate::DotPaths;
     use serde_json::json;
     use serde_json::Value;
+    use serde::{Serialize,Deserialize};
 
     #[test]
     fn get_scalar_with_empty_path() {
@@ -803,5 +806,50 @@ mod tests {
             vec.dot_replace("x.bbb.0", "betelgeuze")
         );
         assert_eq!(json!({"one": "two", "x": {"bbb": ["betelgeuze"]}}), vec);
+    }
+
+    #[test]
+    fn stamps() {
+        let mut stamps = Value::Null;
+        // null will become Value::Array(vec![])
+
+        #[derive(Serialize,Deserialize,PartialEq,Default)]
+        struct Stamp {
+            country: String,
+            year: u32,
+            color: String,
+            #[serde(rename = "face value")]
+            face_value: String,
+        };
+
+        stamps.dot_set("0", json!({
+            "country": "British Mauritius",
+            "year": 1847,
+            "color": "orange",
+            "face value": "1 penny"
+        }));
+
+        // append
+        stamps.dot_set(">", Stamp {
+            country: "British Mauritius".to_string(),
+            year: 1847,
+            color: "blue".to_string(),
+            face_value: "2 pence".to_string(),
+        });
+
+        assert_eq!("orange", stamps.dot_get::<String>("0.color").unwrap());
+        assert_eq!("blue", stamps.dot_get::<String>("1.color").unwrap());
+
+        assert_eq!(1847, stamps.dot_get::<Stamp>("1").unwrap().year);
+
+        // Remove the first stamp's "face value" attribute
+        assert_eq!(Some("1 penny".to_string()), stamps.dot_get("0.face value"));
+        stamps.dot_remove("0.face value");
+        assert_eq!(Option::<Value>::None, stamps.dot_get("0.face value"));
+
+        // change the second stamp's year
+        let old_year : u32 = stamps.dot_replace("1.year", 1850).unwrap();
+        assert_eq!(1847, old_year);
+        assert_eq!(1850, stamps.dot_get::<u32>("1.year").unwrap());
     }
 }
