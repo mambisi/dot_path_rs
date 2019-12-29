@@ -2,15 +2,41 @@
 
 Access members of nested JSON arrays and objects using "dotted paths".
 
-The `DotPaths` trait is implemented for `serde_json::Value`, 
-`serde_json::Map<String, serde_json::Value>`, and  `Vec<serde_json::Value>`.
+Consider this example JSON:
+
+```json
+{
+  "fruit": [
+    {"name": "lemon", "color":  "yellow"},
+    {"name": "apple", "color":  "green"},
+    {"name": "cherry", "color":  "red"}
+  ]
+}
+```
+
+The following can be used to access its parts:
+- `obj.dot_get("fruit")` ... get the fruits array
+- `obj.dot_get("fruit.0.name")` ... 0th fruit name, "lemon"
+- `obj.dot_get("fruit.>.color")` ... last fruit's color, "red"
+
+The JSON can also be manipulated:
+
+- `obj.dot_take("fruit.1")` ... extract the "apple" object, removing it from the JSON
+- `obj.dot_set("fruit.<1", json!({"name":"plum","color":"blue"})` ... insert before the 1st element, shifting the rest
+- `obj.dot_set("fruit.>1", json!({"name":"plum","color":"blue"})` ... insert after the 1st element, shifting the rest
+- `obj.dot_set("fruit.>.name", "tangerine")` ... set the last fruit's name
+- `obj.dot_set("fruit.>", Value::Null)` ... append a JSON null
+- `obj.dot_set("fruit.<", true)` ... prepend a JSON true
+- `obj.dot_set("vegetables.onion.>", "aaa")` ... add `{"vegetables":{"onion":["aaa"]}}` to the object
 
 Any serializable type or `serde_json::Value` can be stored to or retrieved from
-the nested object. Any value stored in the object can also be modified in place 
-by getting a mutable reference.
+the nested object (`Value::Object`, `Value::Array`, `Value::Null`).
+ 
+Any value stored in the object can also be modified in place, without deserialization, 
+by getting a mutable reference (`dot_get_mut(path)`).
 
 This crate is useful for tasks such as working with dynamic JSON API payloads,
-parsing config files, or polymorphic data store.
+parsing config files, or building a polymorphic data store.
 
 ## Supported Operations
 
@@ -36,12 +62,25 @@ It becomes an array or object of the appropriate type based on the root key.
 
 ## Dotted Path Syntax
 
-Array keys must be numeric (integer), or one of the special patterns listed below.
+### Map Patterns
 
 To avoid ambiguity, it's not allowed to use numeric keys (or keys starting with a number) 
 as map keys. Map keys must start with an ASCII letter or underscore and must not contain a dot (`.`).
 
-### Array Index Patterns
+Examples:
+
+- `abc`
+- `_123`
+- `key with spaces`
+
+If a numeric key or a key nonconforming in other way must be used, prefix it with `#`. 
+It will be taken literally as a string, excluding the prefix.
+
+e.g. to get 456 from `{"foo":{"123":456}}`, use `foo.#123` instead of `foo.123`
+
+### Array Patterns
+
+Array keys must be numeric (integer), or one of the special patterns listed below.
 
 - `-` ... prepend
 - `<` ... prepend (or get first)

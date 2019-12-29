@@ -23,6 +23,8 @@ pub trait DotPaths {
     /// # Special keys
     /// Arrays can be indexed by special keys for reading:
     /// - `>` ... last element
+    /// - `#123` ... map keys may be prefixed by `#` to use numeric strings
+    ///   or other unusual forms (excluding dot `.`, which is still illegal in keys)
     ///
     /// # Panics
     /// - If the path attempts to index into a scalar (e.g. `"foo.bar"` in `{"foo": 123}`)
@@ -252,14 +254,23 @@ where
 
 /// Check if a key is valid to use by dot paths in Value::Object.
 /// The key must start with an alpha character or underscore and must not contain period.
-fn validate_map_key(key: &str) {
-    if key.parse::<usize>().is_ok() {
-        panic!("Numeric keys are not allowed in maps: {}", key);
-    }
-
-    if !key.starts_with(|p: char| p.is_ascii_alphabetic() || p == '_') || key.contains('.') {
+#[must_use]
+fn validate_map_key(key: &str) -> &str {
+    if key.contains('.') {
+        // this shouldn't happen due to the way the splitting works
         panic!("Invalid map key: {}", key);
     }
+
+    // 'literal modifier', e.g. for numeric map keys
+    if key.starts_with('#') {
+        return &key[1..];
+    }
+
+    if !key.starts_with(|p: char| p.is_ascii_alphabetic() || p == '_') {
+        panic!("Invalid map key: {}", key);
+    }
+
+    key
 }
 
 impl DotPaths for serde_json::Map<String, serde_json::Value> {
@@ -268,7 +279,7 @@ impl DotPaths for serde_json::Map<String, serde_json::Value> {
         T: DeserializeOwned,
     {
         let (my, sub) = path_split(path);
-        validate_map_key(my);
+        let my = validate_map_key(my);
 
         if let Some(sub_path) = sub {
             self.get(my)
@@ -285,7 +296,7 @@ impl DotPaths for serde_json::Map<String, serde_json::Value> {
 
     fn dot_get_mut(&mut self, path: &str) -> Option<&mut Value> {
         let (my, sub) = path_split(path);
-        validate_map_key(my);
+        let my = validate_map_key(my);
 
         if let Some(sub_path) = sub {
             self.get_mut(my)
@@ -301,7 +312,7 @@ impl DotPaths for serde_json::Map<String, serde_json::Value> {
         T: Serialize,
     {
         let (my, sub) = path_split(path);
-        validate_map_key(my);
+        let my = validate_map_key(my);
 
         if let Some(subpath) = sub {
             if self.contains_key(my) {
@@ -321,7 +332,7 @@ impl DotPaths for serde_json::Map<String, serde_json::Value> {
         U: DeserializeOwned,
     {
         let (my, sub) = path_split(path);
-        validate_map_key(my);
+        let my = validate_map_key(my);
 
         if let Some(subpath) = sub {
             if self.contains_key(my) {
@@ -344,7 +355,7 @@ impl DotPaths for serde_json::Map<String, serde_json::Value> {
         T: DeserializeOwned,
     {
         let (my, sub) = path_split(path);
-        validate_map_key(my);
+        let my = validate_map_key(my);
 
         if let Some(subpath) = sub {
             if let Some(item) = self.get_mut(my) {
@@ -768,6 +779,19 @@ mod tests {
 
         let vec = json!({"one": "two"});
         assert_eq!(None, vec.dot_get::<Value>("xxx"));
+    }
+
+    #[test]
+    fn map_escaped_keys() {
+        let mut map = json!({});
+        map.dot_set("#0.#1", 123);
+        assert_eq!(json!({"0": {"1": 123}}), map);
+        map.dot_set("#0.#2", 456);
+
+        assert_eq!(Some(123), map.dot_get("#0.#1"));
+        assert_eq!(Some(123), map.dot_take("#0.#1"));
+        assert_eq!(json!({"0": {"2": 456}}), map);
+        assert_eq!(true, map.dot_remove("#0.#2"));
     }
 
     #[test]
