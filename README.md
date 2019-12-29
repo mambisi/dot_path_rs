@@ -27,7 +27,8 @@ The JSON can also be manipulated:
 - `obj.dot_set("fruit.>.name", "tangerine")` ... set the last fruit's name
 - `obj.dot_set("fruit.>", Value::Null)` ... append a JSON null
 - `obj.dot_set("fruit.<", true)` ... prepend a JSON true
-- `obj.dot_set("vegetables.onion.>", "aaa")` ... add `{"vegetables":{"onion":["aaa"]}}` to the object
+- `obj.dot_set("vegetables.onion.>", "aaa")` ... add `"vegetables": {"onion":["aaa"]}` to the outer object 
+  (the parent map and array are created automatically)
 
 Any serializable type or `serde_json::Value` can be stored to or retrieved from
 the nested object (`Value::Object`, `Value::Array`, `Value::Null`).
