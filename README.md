@@ -49,7 +49,7 @@ Five principal methods are added by the `DotPaths` trait to `serde_json::Value`,
 - `dot_get_mut(path)` - get a mutable reference to an element of the JSON object
 - `dot_set(path, value)` - set a new value, dropping the original (if any)
 - `dot_replace(path, value)` - set a new value, returning the original (if any)
-- `dot_take(path, value)` - remove a value by path, returning it (if any)
+- `dot_take(path)` - remove a value by path, returning it (if any)
 
 `dot_set()` supports array manipulation syntax not found in the other methods, namely the 
 `>n` and `<n` pattern to insert an element before or after an index, shifting the rest of the `Vec`.
