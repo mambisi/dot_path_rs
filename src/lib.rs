@@ -1,227 +1,331 @@
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use serde_json::{Map, Value};
-use std::cmp::Ordering;
 use std::mem;
 
 #[cfg(test)]
-#[macro_use] extern crate serde_derive;
+#[macro_use]
+extern crate serde_derive;
+#[macro_use]
+extern crate failure;
+
+/// Errors from dot_path methods
+#[derive(Debug, Fail)]
+pub enum Error {
+    /// Path hit a value in the JSON object that is not array or map
+    /// and could not continue the traversal.
+    ///
+    /// (e.g. `foo.bar` in `{"foo": 123}`)
+    #[fail(display = "Unexpected value reached while traversing path")]
+    BadPathElement,
+
+    /// Array index out of range
+    #[fail(display = "Invalid array index: {}", _0)]
+    BadIndex(usize),
+
+    /// Invalid (usually empty) key used in Map or Array.
+    /// If the key is valid but out of bounds, `BadIndex` will be used.
+    #[fail(display = "Invalid key: {}", _0)]
+    InvalidKey(String),
+
+    /// Error serializing or deserializing a value
+    #[fail(display = "Invalid array or map key")]
+    SerdeError(#[fail(cause)] serde_json::Error),
+}
+
+impl From<serde_json::Error> for Error {
+    fn from(e: serde_json::Error) -> Self {
+        Error::SerdeError(e)
+    }
+}
+
+use crate::Error::{BadPathElement, InvalidKey, BadIndex};
+
+pub type Result<T> = std::result::Result<T, Error>;
+
+/// Convert Some(Value::Null) to None.
+trait NullToNone<T> {
+    fn null_to_none(self) -> Option<T>;
+}
+
+impl NullToNone<Value> for Option<Value> {
+    fn null_to_none(self) -> Option<Value> {
+        match self {
+            None | Some(Value::Null) => None,
+            Some(v) => Some(v),
+        }
+    }
+}
+
+impl<'a> NullToNone<&'a Value> for Option<&'a Value> {
+    fn null_to_none(self) -> Option<&'a Value> {
+        match self {
+            None | Some(&Value::Null) => None,
+            Some(v) => Some(v),
+        }
+    }
+}
 
 /// Access and mutate nested JSON elements by dotted paths
 ///
 /// The path is composed of keys separated by dots, e.g. `foo.bar.1`.
 ///
+/// All symbols in a path may be escaped by backslash (`\`) to have them treated literally,
+/// e.g. to access a key containing a period.
+///
 /// Arrays are indexed by numeric strings or special keys (see `dot_get()` and `dot_set()`).
 ///
 /// This trait is implemented for `serde_json::Value`, specifically the
 /// `Map`, `Array`, and `Null` variants. Empty path can also be used to access a scalar.
+///
+/// Methods on this trait do not panic, errors are passed to the caller.
 pub trait DotPaths {
     /// Get an item by path, if present.
     ///
-    /// JSON `null` becomes `None`, same as unpopulated path.
+    /// If the element does not exist or is `null`, None is returned.
+    /// Accessing array index out of range raises `Err(BadIndex)`.
     ///
-    /// # Special keys
-    /// Arrays can be indexed by special keys for reading:
-    /// - `>` ... last element
-    /// - `#123` ... map keys may be prefixed by `#` to use numeric strings
-    ///   or other unusual forms (excluding dot `.`, which is still illegal in keys)
+    /// The path does not need to reach a leaf node, i.e. it is possible to extract a subtree
+    /// of a JSON object this way.
     ///
-    /// # Panics
-    /// - If the path attempts to index into a scalar (e.g. `"foo.bar"` in `{"foo": 123}`)
-    /// - If the path uses invalid key in an array or map
-    fn dot_get<T>(&self, path: &str) -> Option<T>
-    where
-        T: DeserializeOwned;
+    /// # Special symbols
+    /// - `>` ... last element of an array
+    /// - `<` ... first element of an array (same as `0`)
+    fn dot_get<T>(&self, path: &str) -> Result<Option<T>>
+        where
+            T: DeserializeOwned;
 
-    /// Get an item, or a default value.
+    /// Get an item by path, or a default value if it does not exist.
     ///
-    /// # Special keys
-    /// see `dot_get()`
+    /// This method is best suited for JSON objects (`Map`) or nullable fields.
     ///
-    /// # Panics
-    /// see `dot_get()`
-    fn dot_get_or<T>(&self, path: &str, def: T) -> T
-    where
-        T: DeserializeOwned,
+    /// See `dot_get()` for more details.
+    fn dot_get_or<T>(&self, path: &str, def: T) -> Result<T>
+        where
+            T: DeserializeOwned,
     {
-        self.dot_get(path).unwrap_or(def)
+        self.dot_get(path)
+            .map(|o| o.unwrap_or(def))
     }
 
     /// Get an item, or a default value using the Default trait
     ///
-    /// # Special keys
-    /// see `dot_get()`
+    /// This method is best suited for JSON objects (`Map`) or nullable fields.
     ///
-    /// # Panics
-    /// see `dot_get()`
-    fn dot_get_or_default<T>(&self, path: &str) -> T
-    where
-        T: DeserializeOwned + Default,
+    /// See `dot_get()` for more details.
+    fn dot_get_or_default<T>(&self, path: &str) -> Result<T>
+        where
+            T: DeserializeOwned + Default,
     {
-        self.dot_get(path).unwrap_or_default()
+        self.dot_get_or(path, T::default())
     }
 
     /// Get a mutable reference to an item
     ///
-    /// # Special keys
-    /// see `dot_get()`
+    /// If the path does not exist but a value on the path can be created (i.e. because the path
+    /// reaches `null`, array or object), a `null` value is inserted in that location (creating
+    /// its parent nodes as needed) and a mutable reference to this new `null` node is returned.
     ///
-    /// # Panics
-    /// see `dot_get()`
-    fn dot_get_mut(&mut self, path: &str) -> Option<&mut Value>;
+    /// The path does not need to reach a leaf node, i.e. it is possible to extract a subtree
+    /// of a JSON object this way.
+    ///
+    /// # Special keys
+    /// - `>` ... last element of an array
+    /// - `<` ... first element of an array (same as `0`)
+    fn dot_get_mut(&mut self, path: &str) -> Result<&mut Value>;
 
-    /// Insert an item by path.
+    /// Insert an item by path. The original value is dropped, if any.
     ///
-    /// # Special keys
-    /// Arrays can be indexed by special keys:
-    /// - `+` or `>` ... append
-    /// - `-` or `<` ... prepend
+    /// # Special symbols
+    /// Arrays can be modified using special keys in the path:
+    /// - `+` or `>>` ... append
+    /// - `-` or `<<` ... prepend
     /// - `>n` ... insert after an index `n`
     /// - `<n` ... insert before an index `n`
-    ///
-    /// # Panics
-    /// see `dot_get()`
-    fn dot_set<T>(&mut self, path: &str, value: T)
-    where
-        T: Serialize;
+    /// - `>` ... last element of an array
+    /// - `<` ... first element of an array (same as `0`)
+    fn dot_set<T>(&mut self, path: &str, value: T) -> Result<()>
+        where
+            T: Serialize {
+
+        // This is a default implementation.
+        // Vec uses a custom implementation to support the special syntax.
+
+        let _ = self.dot_replace::<T, Value>(path, value)?; // Original value is dropped
+        Ok(())
+    }
 
     /// Replace a value by path with a new value.
     /// The value types do not have to match.
     ///
-    /// # Panics
-    /// see `dot_get()`
-    fn dot_replace<T, U>(&mut self, path: &str, value: T) -> Option<U>
-    where
-        T: Serialize,
-        U: DeserializeOwned;
-
-    /// Get an item using a path, removing it from the store.
-    /// If no item was stored under this path, then None is returned.
+    /// Returns `Ok(None)` if the path was previously empty or `null`.
     ///
-    /// # Panics
-    /// see `dot_get()`
-    fn dot_take<T>(&mut self, path: &str) -> Option<T>
-    where
-        T: DeserializeOwned;
+    /// # Special keys
+    /// - `>` ... last element of an array
+    /// - `<` ... first element of an array (same as `0`)
+    fn dot_replace<NEW, OLD>(&mut self, path: &str, value: NEW) -> Result<Option<OLD>>
+        where
+            NEW: Serialize,
+            OLD: DeserializeOwned;
 
-    /// Remove an item matching a key.
+    /// Get an item using a path, removing it from the object.
+    ///
+    /// Value becomes `null` when taken by an empty path, map entry is removed,
+    /// and array item is extracted, shifting the remainder forward.
+    ///
+    /// Returns `Ok(None)` if the path was previously empty or `null`.
+    ///
+    /// # Special keys
+    /// - `>` ... last element of an array
+    /// - `<` ... first element of an array (same as `0`)
+    fn dot_take<T>(&mut self, path: &str) -> Result<Option<T>>
+        where
+            T: DeserializeOwned;
+
+    /// Remove and drop an item matching a key.
     /// Returns true if any item was removed.
     ///
-    /// # Panics
-    /// see `dot_get()`
-    fn dot_remove(&mut self, path: &str) -> bool {
-        self.dot_take::<Value>(path).is_some()
+    /// # Special keys
+    /// - `>` ... last element of an array
+    /// - `<` ... first element of an array (same as `0`)
+    fn dot_remove(&mut self, path: &str) -> Result<()> {
+        let _ = self.dot_take::<Value>(path)?; // Original value is dropped
+        Ok(())
     }
 }
 
 /// Split the path string by dot, if present.
 ///
-/// Returns a tuple of (before_dot, after_dot)
-fn path_split(path: &str) -> (&str, Option<&str>) {
-    let dot = path.find('.');
-    match dot {
-        None => (path, None),
-        Some(pos) => (&path[0..pos], Some(&path[pos + 1..])),
+/// Returns a tuple of (before_dot, after_dot), removing escapes
+fn path_split(path: &str) -> (String, Option<&str>) {
+    let mut buf = String::new();
+    let mut escaped = false;
+    for (n, c) in path.char_indices() {
+        match c {
+            _ if escaped => {
+                buf.push(c);
+                escaped = false;
+            }
+            '\\' => {
+                escaped = true;
+            }
+            '.' => {
+                return (buf, Some(&path[n + 1..]));
+            }
+            _ => {
+                buf.push(c);
+            }
+        }
     }
+
+    // trailing slash is discarded
+    (buf, None)
 }
 
 impl DotPaths for serde_json::Value {
-    fn dot_get<T>(&self, path: &str) -> Option<T>
-    where
-        T: DeserializeOwned,
+    fn dot_get<T>(&self, path: &str) -> Result<Option<T>>
+        where
+            T: DeserializeOwned,
     {
         match self {
             Value::Array(vec) => vec.dot_get(path),
             Value::Object(map) => map.dot_get(path),
-            Value::Null => None,
+            Value::Null => Ok(None),
             _ => {
                 if path.is_empty() {
-                    serde_json::from_value(self.to_owned()).ok()
+                    // Get the whole value.
+                    // We know it's not null - checked above
+                    Ok(Some(serde_json::from_value(self.to_owned())?))
                 } else {
-                    panic!("Node is not array or object!");
+                    // Path continues, but we can't traverse into a scalar
+                    Err(BadPathElement)
                 }
             }
         }
     }
 
-    fn dot_get_mut(&mut self, path: &str) -> Option<&mut Value> {
+    fn dot_get_mut(&mut self, path: &str) -> Result<&mut Value> {
         match self {
             Value::Array(vec) => vec.dot_get_mut(path),
             Value::Object(map) => map.dot_get_mut(path),
-            Value::Null => None,
             _ => {
                 if path.is_empty() {
-                    Some(self)
+                    Ok(self)
                 } else {
-                    panic!("Node is not array or object!");
+                    if self.is_null() {
+                        // Spawn parents
+                        self.dot_set(path, Value::Null)?;
+                        // Now it will succeed
+                        return self.dot_get_mut(path);
+                    }
+
+                    // Path continues, but we can't traverse into a scalar
+                    Err(BadPathElement)
                 }
             }
         }
     }
 
-    fn dot_set<T>(&mut self, path: &str, value: T)
-    where
-        T: Serialize,
-    {
-        match self {
-            Value::Array(vec) => {
-                vec.dot_set(path, value);
-            }
-            Value::Object(map) => {
-                map.dot_set(path, value);
-            }
-            Value::Null => {
-                mem::replace(self, new_by_path_root(path, value));
-            }
-            _ => {
-                if path.is_empty() {
-                    mem::replace(self, serde_json::to_value(value).expect("Serialize error"));
-                } else {
-                    panic!("Node is not an array, object, or null!");
-                }
-            }
-        }
-    }
-
-    fn dot_replace<T, U>(&mut self, path: &str, value: T) -> Option<U>
-    where
-        T: Serialize,
-        U: DeserializeOwned,
+    fn dot_replace<NEW, OLD>(&mut self, path: &str, value: NEW) -> Result<Option<OLD>>
+        where
+            NEW: Serialize,
+            OLD: DeserializeOwned,
     {
         match self {
             Value::Array(vec) => vec.dot_replace(path, value),
             Value::Object(map) => map.dot_replace(path, value),
             Value::Null => {
-                self.dot_set(path, value);
-                None
+                // spawn new
+                mem::replace(self, new_by_path_root(path, value)?);
+                Ok(None)
             }
             _ => {
                 if path.is_empty() {
-                    let new = serde_json::to_value(value).expect("Serialize error");
+                    let new = serde_json::to_value(value)?;
                     let old = mem::replace(self, new);
-                    Some(serde_json::from_value(old).expect("Unserialize error"))
+                    Ok(serde_json::from_value(old)?)
                 } else {
-                    panic!("Node is not an array, object, or null!")
+                    // Path continues, but we can't traverse into a scalar
+                    Err(BadPathElement)
                 }
             }
         }
     }
 
-    fn dot_take<T>(&mut self, path: &str) -> Option<T>
-    where
-        T: DeserializeOwned,
+    fn dot_take<T>(&mut self, path: &str) -> Result<Option<T>>
+        where
+            T: DeserializeOwned,
     {
         match self {
             Value::Array(vec) => vec.dot_take(path),
             Value::Object(map) => map.dot_take(path),
-            Value::Null => None,
+            Value::Null => Ok(None),
             _ => {
                 if path.is_empty() {
-                    let old = mem::replace(self, Value::Null);
-                    Some(serde_json::from_value(old).expect("Unserialize error"))
+                    // This won't happen with array or object, they really remove the value.
+                    // Value is replaced with NULL only when dot_take() is called
+                    // with an empty path.
+                    let old = mem::replace(self, Value::Null); // we know it's not null, checked above
+                    Ok(Some(serde_json::from_value(old)?))
                 } else {
-                    panic!("Node is not an array, object, or null!")
+                    // Path continues, but we can't traverse into a scalar
+                    Err(BadPathElement)
                 }
+            }
+        }
+    }
+
+    fn dot_set<T>(&mut self, path: &str, value: T) -> Result<()>
+        where
+            T: Serialize {
+        match self {
+            // Special case for Vec, which implements additional path symbols
+            Value::Array(a) => {
+                a.dot_set(path, value)
+            }
+            _ => {
+                let _ = self.dot_replace::<T, Value>(path, value)?; // Original value is dropped
+                Ok(())
             }
         }
     }
@@ -230,321 +334,398 @@ impl DotPaths for serde_json::Value {
 /// Create a Value::Object or Value::Array based on a nested path.
 ///
 /// Builds the parent path to a non-existent key in set-type operations.
-fn new_by_path_root<T>(path: &str, value: T) -> Value
-where
-    T: Serialize,
+#[must_use]
+fn new_by_path_root<T>(path: &str, value: T) -> Result<Value>
+    where
+        T: Serialize,
 {
     if path.is_empty() {
-        return serde_json::to_value(value).expect("Serialize error");
+        return Ok(serde_json::to_value(value)?);
     }
 
+    let escaped = path.starts_with('\\');
     let (sub1, _) = path_split(path);
-    if sub1 == "0" || sub1 == "+" || sub1 == "<" || sub1 == ">" {
+    if !escaped && ["0", "+", "-", "<", ">", "<<", ">>"].contains(&sub1.as_str()) {
         // new vec
         let mut new_vec = vec![];
-        new_vec.dot_set(path, value);
-        Value::Array(new_vec)
+        new_vec.dot_set(path, value)?;
+        Ok(Value::Array(new_vec))
     } else {
         // new map
         let mut new_map = Map::new();
-        new_map.dot_set(path, value);
-        Value::Object(new_map)
+        new_map.dot_set(path, value)?;
+        Ok(Value::Object(new_map))
     }
-}
-
-/// Check if a key is valid to use by dot paths in Value::Object.
-/// The key must start with an alpha character or underscore and must not contain period.
-#[must_use]
-fn validate_map_key(key: &str) -> &str {
-    if key.contains('.') {
-        // this shouldn't happen due to the way the splitting works
-        panic!("Invalid map key: {}", key);
-    }
-
-    // 'literal modifier', e.g. for numeric map keys
-    if key.starts_with('#') {
-        return &key[1..];
-    }
-
-    if !key.starts_with(|p: char| p.is_ascii_alphabetic() || p == '_') {
-        panic!("Invalid map key: {}", key);
-    }
-
-    key
 }
 
 impl DotPaths for serde_json::Map<String, serde_json::Value> {
-    fn dot_get<T>(&self, path: &str) -> Option<T>
-    where
-        T: DeserializeOwned,
+    fn dot_get<T>(&self, path: &str) -> Result<Option<T>>
+        where
+            T: DeserializeOwned,
     {
         let (my, sub) = path_split(path);
-        let my = validate_map_key(my);
+
+        if my.is_empty() {
+            return Err(InvalidKey(my));
+        }
 
         if let Some(sub_path) = sub {
-            self.get(my)
-                .map(|child| child.dot_get(sub_path)) // this produces Option<Option<T>>
-                .unwrap_or_default()
+            match self.get(&my).null_to_none() {
+                None => Ok(None),
+                Some(child) => child.dot_get(sub_path)
+            }
         } else {
-            self.get(my)
-                .map(ToOwned::to_owned)
-                .map(serde_json::from_value)
-                .transpose() // Option<Result> to Result<Option>
-                .unwrap_or_default() // get rid of the result
+            match self.get(&my).null_to_none() {
+                None => Ok(None),
+                Some(m) => {
+                    Ok(Some(serde_json::from_value::<T>(m.to_owned())?))
+                }
+            }
         }
     }
 
-    fn dot_get_mut(&mut self, path: &str) -> Option<&mut Value> {
+    fn dot_get_mut(&mut self, path: &str) -> Result<&mut Value> {
         let (my, sub) = path_split(path);
-        let my = validate_map_key(my);
+
+        if my.is_empty() {
+            return Err(InvalidKey(my));
+        }
 
         if let Some(sub_path) = sub {
-            self.get_mut(my)
-                .map(|m| m.get_mut(sub_path))
-                .unwrap_or_default()
-        } else {
-            self.get_mut(my)
-        }
-    }
-
-    fn dot_set<T>(&mut self, path: &str, value: T)
-    where
-        T: Serialize,
-    {
-        let (my, sub) = path_split(path);
-        let my = validate_map_key(my);
-
-        if let Some(subpath) = sub {
-            if self.contains_key(my) {
-                self.get_mut(my).unwrap().dot_set(subpath, value);
+            if self.contains_key(&my) {
+                self.get_mut(&my)
+                    .unwrap() // OK
+                    .dot_get_mut(sub_path)
             } else {
-                self.insert(my.into(), new_by_path_root(subpath, value));
+                // create a subtree
+                self.insert(my.clone(), new_by_path_root(sub_path, Value::Null)?);
+
+                // get reference to the new Null
+                self.get_mut(&my)
+                    .unwrap() // OK, we just inserted it
+                    .dot_get_mut(sub_path)
             }
         } else {
-            let packed = serde_json::to_value(value).expect("Serialize error");
-            self.insert(my.into(), packed);
+            if self.contains_key(&my) {
+                Ok(self.get_mut(&my).unwrap())
+            } else {
+                // create a null value
+                self.insert(my.clone(), Value::Null);
+                Ok(self.get_mut(&my).unwrap())
+            }
         }
     }
 
-    fn dot_replace<T, U>(&mut self, path: &str, value: T) -> Option<U>
-    where
-        T: Serialize,
-        U: DeserializeOwned,
+    fn dot_replace<NEW, OLD>(&mut self, path: &str, value: NEW) -> Result<Option<OLD>>
+        where
+            NEW: Serialize,
+            OLD: DeserializeOwned,
     {
         let (my, sub) = path_split(path);
-        let my = validate_map_key(my);
+
+        if my.is_empty() {
+            return Err(InvalidKey(my));
+        }
 
         if let Some(subpath) = sub {
-            if self.contains_key(my) {
-                self.get_mut(my).unwrap().dot_replace(subpath, value)
+            if self.contains_key(&my) {
+                match self.get_mut(&my) {
+                    None => Ok(None),
+                    Some(m) => {
+                        m.dot_replace(subpath, value)
+                    }
+                }
             } else {
-                self.dot_set(path, value);
-                None
+                // Build new subpath
+                let _ = self.insert(my, new_by_path_root(subpath, value)?); // always returns None here
+                Ok(None)
             }
         } else {
-            let packed = serde_json::to_value(value).expect("Serialize error");
-            self.insert(my.to_string(), packed)
-                .map(serde_json::from_value)
-                .transpose()
-                .expect("Unserialize error")
+            let packed = serde_json::to_value(value)?;
+            match self.insert(my, packed).null_to_none() {
+                None => Ok(None),
+                Some(old) => {
+                    Ok(serde_json::from_value(old)?)
+                }
+            }
         }
     }
 
-    fn dot_take<T>(&mut self, path: &str) -> Option<T>
-    where
-        T: DeserializeOwned,
+    fn dot_take<T>(&mut self, path: &str) -> Result<Option<T>>
+        where
+            T: DeserializeOwned,
     {
         let (my, sub) = path_split(path);
-        let my = validate_map_key(my);
+
+        if my.is_empty() {
+            return Err(InvalidKey(my));
+        }
 
         if let Some(subpath) = sub {
-            if let Some(item) = self.get_mut(my) {
+            if let Some(item) = self.get_mut(&my) {
                 item.dot_take(subpath)
             } else {
-                None
+                // no such element
+                Ok(None)
             }
         } else {
-            self.remove(my)
-                .map(serde_json::from_value)
-                .transpose() // Option<Result> to Result<Option>
-                .expect("Unserialize error") // get rid of the result
+            match self.remove(&my).null_to_none() {
+                None => Ok(None),
+                Some(old) => {
+                    Ok(serde_json::from_value(old)?)
+                }
+            }
         }
     }
 }
 
 impl DotPaths for Vec<serde_json::Value> {
-    fn dot_get<T>(&self, path: &str) -> Option<T>
-    where
-        T: DeserializeOwned,
+    fn dot_get<T>(&self, path: &str) -> Result<Option<T>>
+        where
+            T: DeserializeOwned,
     {
         let (my, sub) = path_split(path);
-
-        let index: usize = if my == ">" {
-            self.len() - 1
-        } else {
-            my.parse().unwrap()
-        };
-
-        if let Some(subpath) = sub {
-            self.get(index)
-                .map(ToOwned::to_owned)
-                .map(|child| child.dot_get(subpath))
-                .unwrap_or_default()
-        } else {
-            self.get(index)
-                .map(ToOwned::to_owned)
-                .map(serde_json::from_value)
-                .transpose()
-                .unwrap_or_default()
-        }
-    }
-
-    fn dot_get_mut(&mut self, path: &str) -> Option<&mut Value> {
-        let (my, sub) = path_split(path);
-
-        let my: usize = my
-            .parse()
-            .unwrap_or_else(|_| panic!("Cannot index an array by \"{}\"", my));
-
-        if let Some(subpath) = sub {
-            self.get_mut(my)
-                .map(|m: &mut Value| m.get_mut(subpath))
-                .unwrap_or_default()
-        } else {
-            self.get_mut(my)
-        }
-    }
-
-    fn dot_set<T>(&mut self, path: &str, value: T)
-    where
-        T: Serialize,
-    {
-        let (mut my, sub) = path_split(path);
 
         if my.is_empty() {
-            panic!("Cannot index array by empty key");
+            return Err(InvalidKey(my));
         }
 
-        let mut insert = false;
-        let mut add = 0isize;
+        if self.is_empty() {
+            return Ok(None);
+        }
 
-        if my.starts_with('<') {
-            // "<n" means insert before n
-            // "<" means prepend
-            insert = true;
-            my = &my[1..];
-        } else if my.starts_with('>') {
-            insert = true;
-            my = &my[1..];
-            if my.is_empty() {
-                // ">" means append
-                add = self.len() as isize;
-            } else {
-                // ">n" means insert after
-                add = 1;
+        let index: usize = match my.as_str() {
+            ">" => self.len() - 1, // non-empty checked above
+            "<" => 0,
+            _ => my.parse()
+                .map_err(|_| InvalidKey(my))?
+        };
+
+        if index >= self.len() {
+            return Err(BadIndex(index));
+        }
+
+        if let Some(subpath) = sub {
+            match self.get(index).null_to_none() {
+                None => Ok(None),
+                Some(child) => {
+                    child.dot_get(subpath)
+                }
+            }
+        } else {
+            match self.get(index).null_to_none() {
+                None => Ok(None),
+                Some(value) => {
+                    Ok(serde_json::from_value(value.to_owned())?)
+                }
             }
         }
+    }
 
-        let mut my = match my {
-            // append
-            "+" => self.len(),
-            // prepend
-            "-" => {
+    fn dot_get_mut(&mut self, path: &str) -> Result<&mut Value> {
+        let (my, sub) = path_split(path);
+
+        if my.is_empty() {
+            return Err(InvalidKey(my));
+        }
+
+        let index: usize = match my.as_str() {
+            ">" => if self.len() == 0 {
+                0
+            } else {
+                self.len() - 1
+            },
+            "<" => 0,
+            _ => my.parse()
+                .map_err(|_| InvalidKey(my))?
+        };
+
+        if index > self.len() {
+            return Err(BadIndex(index));
+        }
+
+        if let Some(subpath) = sub {
+            if index < self.len() {
+                self.get_mut(index)
+                    .unwrap()
+                    .dot_get_mut(subpath)
+            } else {
+                // create a subtree
+                self.push(new_by_path_root(subpath, Value::Null)?);
+
+                // get reference to the new Null
+                return self.get_mut(index)
+                    .unwrap() // OK, we just inserted it
+                    .dot_get_mut(subpath);
+            }
+        } else {
+            if index < self.len() {
+                Ok(self.get_mut(index).unwrap())
+            } else {
+                // create a subtree
+                self.push(Value::Null);
+
+                // get reference to the new Null
+                return Ok(self.get_mut(index)
+                    .unwrap()); // OK
+
+            }
+        }
+    }
+
+    fn dot_set<T>(&mut self, path: &str, value: T) -> Result<()>
+        where
+            T: Serialize,
+    {
+        // implemented separately from replace because of the special index handling
+        let (my_s, sub) = path_split(path);
+
+        if my_s.is_empty() {
+            return Err(InvalidKey(my_s));
+        }
+
+        let my = my_s.as_str(); // so it can be cropped
+
+        let mut insert = false;
+
+        let index = match my {
+            "<" => 0, // first
+            ">" => if self.is_empty() {
+                0
+            } else {
+                self.len() - 1
+            }
+            "-" | "<<" => {
+                // prepend
                 insert = true;
                 0
             }
-            // empty (this happens only if the < or > was removed above)
-            "" => 0,
-            _ => my
-                .parse()
-                .unwrap_or_else(|_| panic!("Cannot index an array by \"{}\"", my)),
+            "+" | ">>" => {
+                // append
+                self.len()
+            }
+            _ if my.starts_with('>') => {
+                // insert after
+                insert = true;
+                (&my[1..]).parse::<usize>()
+                    .map_err(|_| InvalidKey(my_s))? + 1
+            }
+            _ if my.starts_with('<') => {
+                // insert before
+                insert = true;
+                (&my[1..]).parse::<usize>()
+                    .map_err(|_| InvalidKey(my_s))?
+            }
+            _ => my.parse::<usize>()
+                    .map_err(|_| InvalidKey(my_s))?
         };
 
-        my = (my as isize + add) as usize;
+        if index > self.len() {
+            // equal is OK, that means append. More is an error
+            return Err(BadIndex(index));
+        }
 
-        match my.cmp(&self.len()) {
-            Ordering::Less => {
+        if let Some(subpath) = sub {
+            if index < self.len() {
                 if insert {
-                    // insert
-                    if let Some(subpath) = sub {
-                        self.insert(my, new_by_path_root(subpath, value));
-                    } else {
-                        self.insert(my, serde_json::to_value(value).expect("Serialize error"));
-                    }
+                    self.insert(index, new_by_path_root(subpath, value)?);
                 } else {
                     // replace
-                    if let Some(subpath) = sub {
-                        self[my].dot_set(subpath, value);
-                    } else {
-                        self[my] = serde_json::to_value(value).expect("Serialize error");
-                    }
+                    self[index].dot_set(subpath, value)?;
                 }
+            } else {
+                // Append
+                self.push(new_by_path_root(subpath, value)?);
             }
-            Ordering::Equal => {
-                if let Some(subpath) = sub {
-                    self.push(new_by_path_root(subpath, value))
+        } else {
+            if index < self.len() {
+                if insert {
+                    self.insert(index, serde_json::to_value(value)?);
                 } else {
-                    self.push(serde_json::to_value(value).expect("Serialize error"))
+                    // replace
+                    self[index] = serde_json::to_value(value)?; // old value is dropped
                 }
-            }
-            Ordering::Greater => {
-                panic!("Index out of bounds.");
+            } else {
+                // Append
+                self.push(serde_json::to_value(value)?);
             }
         }
+
+        Ok(())
     }
 
-    fn dot_replace<T, U>(&mut self, path: &str, value: T) -> Option<U>
-    where
-        T: Serialize,
-        U: DeserializeOwned,
+    fn dot_replace<T, U>(&mut self, path: &str, value: T) -> Result<Option<U>>
+        where
+            T: Serialize,
+            U: DeserializeOwned,
     {
         let (my, sub) = path_split(path);
-        let index = my
-            .parse::<usize>()
-            .unwrap_or_else(|_| panic!("Cannot index an array by \"{}\"", my));
+
+        if my.is_empty() {
+            return Err(InvalidKey(my));
+        }
+
+        let index: usize = match my.as_str() {
+            ">" => if self.is_empty() {
+                0
+            } else {
+                self.len() - 1 // last element
+            },
+            "<" => 0,
+            _ => my.parse()
+                .map_err(|_| InvalidKey(my))?
+        };
+
+        if index >= self.len() {
+            // appending is not supported in replace
+            return Err(BadIndex(index));
+        }
 
         if let Some(subpath) = sub {
-            if index < self.len() {
-                let a_mut: &mut Value = self.get_mut(index).unwrap();
-                a_mut.dot_replace(subpath, value)
-            } else {
-                // use the append implementation & validations from dot_set
-                self.dot_set(path, value);
-                None
-            }
+            self.get_mut(index).unwrap() // Bounds checked above
+                .dot_replace(subpath, value)
         } else {
             // No subpath
-            if index < self.len() {
-                let other = serde_json::to_value(value).expect("Serialize error");
-                let old = mem::replace(&mut self[index], other);
-                Some(serde_json::from_value(old).expect("Deserialize error"))
+            let new = serde_json::to_value(value)?;
+            let old = mem::replace(&mut self[index], new);
+            if old.is_null() {
+                Ok(None)
             } else {
-                // use the append implementation & validations from dot_set
-                self.dot_set(my, value);
-                None
+                Ok(serde_json::from_value(old)?)
             }
         }
     }
 
-    fn dot_take<T>(&mut self, path: &str) -> Option<T>
-    where
-        T: DeserializeOwned,
+    fn dot_take<T>(&mut self, path: &str) -> Result<Option<T>>
+        where
+            T: DeserializeOwned,
     {
         let (my, sub) = path_split(path);
-        let my = my
-            .parse()
-            .unwrap_or_else(|_| panic!("Cannot index an array by \"{}\"", my));
 
-        if my >= self.len() {
-            return None;
+        if my.is_empty() {
+            return Err(InvalidKey(my));
+        }
+
+        let index: usize = match my.as_str() {
+            ">" => if self.is_empty() {
+                0
+            } else {
+                self.len() - 1
+            },
+            "<" => 0,
+            _ => my.parse()
+                .map_err(|_| InvalidKey(my))?
+        };
+
+        if index >= self.len() {
+            return Err(BadIndex(index));
         }
 
         if let Some(subpath) = sub {
-            let value: &mut Value = &mut self[my];
-            value.dot_take(subpath)
+            self[index].dot_take(subpath)
         } else {
             // bounds are checked above
-            serde_json::from_value(self.remove(my)).expect("Deserialize error")
+            Ok(serde_json::from_value(self.remove(index))?)
         }
     }
 }
@@ -558,55 +739,54 @@ mod tests {
     #[test]
     fn get_scalar_with_empty_path() {
         let value = Value::String("Hello".to_string());
-        assert_eq!(Some("Hello".to_string()), value.dot_get(""));
+        assert_eq!(Some("Hello".to_string()), value.dot_get("").unwrap());
     }
 
     #[test]
-    #[should_panic]
     fn cant_get_scalar_with_path() {
         let value = Value::String("Hello".to_string());
-        let _ = value.dot_get::<Value>("1.2.3");
+        assert!(value.dot_get::<Value>("1.2.3").is_err());
     }
 
     #[test]
     fn set_null() {
         let mut item = Value::Null;
-        item.dot_set("", "foo");
+        item.dot_set("", "foo").unwrap();
         assert_eq!(Value::String("foo".into()), item);
     }
 
     #[test]
     fn replace_null() {
         let mut item = Value::Null;
-        assert_eq!(None, item.dot_replace::<_, Value>("", "foo"));
+        assert_eq!(None, item.dot_replace::<_, Value>("", "foo").unwrap());
         assert_eq!(Value::String("foo".into()), item);
     }
 
     #[test]
     fn take_null() {
         let mut item = Value::Null;
-        assert_eq!(None, item.dot_take::<Value>(""));
+        assert_eq!(None, item.dot_take::<Value>("").unwrap());
         assert_eq!(Value::Null, item);
 
         let mut item = Value::Bool(true);
-        assert_eq!(Some(true), item.dot_take::<bool>(""));
+        assert_eq!(Some(true), item.dot_take::<bool>("").unwrap());
         assert_eq!(Value::Null, item);
     }
 
     #[test]
     fn set_vec() {
         let mut vec = Value::Array(vec![]);
-        vec.dot_set("0", "first");
-        vec.dot_set("0", "second"); // this replaces it
-        vec.dot_set("1", "third");
-        vec.dot_set("+", "append");
-        vec.dot_set(">", "append2");
-        vec.dot_set("-", "prepend");
-        vec.dot_set("<", "prepend2");
-        vec.dot_set("<0", "prepend3");
-        vec.dot_set(">1", "insert after 1");
-        vec.dot_set(">0", "after0");
-        vec.dot_set("<2", "before2");
+        vec.dot_set("0", "first").unwrap();
+        vec.dot_set("0", "second").unwrap(); // this replaces it
+        vec.dot_set("1", "third").unwrap();
+        vec.dot_set("+", "append").unwrap();
+        vec.dot_set(">>", "append2").unwrap();
+        vec.dot_set("-", "prepend").unwrap();
+        vec.dot_set("<<", "prepend2").unwrap();
+        vec.dot_set("<0", "prepend3").unwrap();
+        vec.dot_set(">1", "insert after 1").unwrap();
+        vec.dot_set(">0", "after0").unwrap();
+        vec.dot_set("<2", "before2").unwrap();
         assert_eq!(
             json!([
                 "prepend3",
@@ -625,38 +805,36 @@ mod tests {
     }
 
     #[test]
-    #[should_panic]
-    fn set_vec_panic_bad_index() {
+    fn set_vec_err_bad_index() {
         let mut vec = Value::Array(vec![]);
-        vec.dot_set("1", "first");
+        assert!(vec.dot_set("1", "first").is_err());
     }
 
     #[test]
-    #[should_panic]
-    fn set_vec_panic_index_not_numeric() {
+    fn set_vec_err_index_not_numeric() {
         let mut vec = Value::Array(vec![]);
-        vec.dot_set("abc", "first");
+        assert!(vec.dot_set("abc", "first").is_err());
     }
 
     #[test]
     fn set_vec_spawn() {
         let mut vec = Value::Array(vec![]);
 
-        vec.dot_set("0.0.0", "first");
-        vec.dot_set("+", "append");
-        vec.dot_set("<1", "in between");
+        vec.dot_set("0.0.0", "first").unwrap();
+        vec.dot_set("+", "append").unwrap();
+        vec.dot_set("<1", "in between").unwrap();
         assert_eq!(json!([[["first"]], "in between", "append"]), vec);
 
-        vec.dot_set("0.0.+", "second");
+        vec.dot_set("0.0.+", "second").unwrap();
         assert_eq!(json!([[["first", "second"]], "in between", "append"]), vec);
 
-        vec.dot_set("0.+", "mmm");
+        vec.dot_set("0.+", "mmm").unwrap();
         assert_eq!(
             json!([[["first", "second"], "mmm"], "in between", "append"]),
             vec
         );
 
-        vec.dot_set("0.+.0", "xyz");
+        vec.dot_set("0.+.0", "xyz").unwrap();
         assert_eq!(
             json!([
                 [["first", "second"], "mmm", ["xyz"]],
@@ -668,9 +846,9 @@ mod tests {
 
         // append and prepend can also spawn a new array
         let mut vec = Value::Array(vec![]);
-        vec.dot_set(">.>.>", "first");
+        vec.dot_set(">>.>>.>>", "first").unwrap();
         assert_eq!(json!([[["first"]]]), vec);
-        vec.dot_set(">.<.>", "second");
+        vec.dot_set(">>.<<.>>", "second").unwrap();
         assert_eq!(json!([[["first"]], [["second"]]]), vec);
     }
 
@@ -681,32 +859,45 @@ mod tests {
             "in between",
             "append"
         ]);
-        assert_eq!(Some("first".to_string()), vec.dot_get("0.0.0"));
-        assert_eq!(Some("second".to_string()), vec.dot_get("0.0.1"));
+        assert_eq!(Some("first".to_string()), vec.dot_get("0.0.0").unwrap());
+        assert_eq!(Some("second".to_string()), vec.dot_get("0.0.1").unwrap());
 
         // this one doesn't exist
-        assert_eq!(None, vec.dot_get::<String>("0.0.3"));
+        assert!(vec.dot_get::<String>("0.0.3").is_err());
 
         // get last
-        assert_eq!(Some(json!(["xyz"])), vec.dot_get("0.>"));
+        assert_eq!(Some(json!(["xyz"])), vec.dot_get("0.>").unwrap());
 
         // retrieve a Value
         assert_eq!(
             Some(json!([["first", "second"], "mmm", ["xyz"]])),
-            vec.dot_get("0")
+            vec.dot_get("0").unwrap()
         );
-        assert_eq!(Some(json!(["first", "second"])), vec.dot_get("0.0"));
+        assert_eq!(Some(json!(["first", "second"])), vec.dot_get("0.0").unwrap());
     }
 
     #[test]
-    #[should_panic]
-    fn get_vec_panic_index_scalar() {
+    fn get_escapes() {
+        let vec = json!({
+            "foo.bar": {
+                "\\slashes\\\\ya.yy": 123,
+                "#hash": {
+                    "foobar": "<aaa>"
+                }
+            }
+        });
+        assert_eq!(Some(123), vec.dot_get("foo\\.bar.\\\\slashes\\\\\\\\ya\\.yy").unwrap());
+        assert_eq!(Some("<aaa>".to_string()), vec.dot_get("foo\\.bar.\\#hash.foobar").unwrap());
+    }
+
+    #[test]
+    fn get_vec_err_index_scalar() {
         let vec = json!([
             [["first", "second"], "mmm", ["xyz"]],
             "in between",
             "append"
         ]);
-        let _ = vec.dot_get::<Value>("0.0.1.4");
+        assert!(vec.dot_get::<Value>("0.0.1.4").is_err());
     }
 
     #[test]
@@ -714,12 +905,12 @@ mod tests {
         let mut vec = json!(["a", "b", "c"]);
 
         // test Take
-        assert_eq!(Some("b".to_string()), vec.dot_take("1"));
-        assert_eq!(None, vec.dot_take::<Value>("4"));
+        assert_eq!(Some("b".to_string()), vec.dot_take("1").unwrap());
+        assert!(vec.dot_take::<Value>("4").is_err());
         assert_eq!(json!(["a", "c"]), vec);
 
         let mut vec = json!([[["a"], "b"], "c"]);
-        assert_eq!(Some("a".to_string()), vec.dot_take("0.0.0"));
+        assert_eq!(Some("a".to_string()), vec.dot_take("0.0.0").unwrap());
         assert_eq!(json!([[[], "b"], "c"]), vec); // empty vec is left in place
     }
 
@@ -727,13 +918,13 @@ mod tests {
     fn remove_from_vec() {
         let mut vec = json!(["a", "b", "c"]);
 
-        assert_eq!(true, vec.dot_remove("1"));
-        assert_eq!(false, vec.dot_remove("4"));
+        assert!(vec.dot_remove("1").is_ok());
+        assert!(vec.dot_remove("4").is_err()); // out of bounds
         assert_eq!(json!(["a", "c"]), vec);
 
         let mut vec = json!([[["a"], "b"], "c"]);
-        assert_eq!(true, vec.dot_remove("0.0.0"));
-        assert_eq!(false, vec.dot_remove("0.0.0"));
+        assert!(vec.dot_remove("0.0.0").is_ok());
+        assert!(vec.dot_remove("0.0.0").is_err()); // doesn't exist
         assert_eq!(json!([[[], "b"], "c"]), vec); // empty vec is left in place
     }
 
@@ -741,85 +932,90 @@ mod tests {
     fn replace_in_vec() {
         let mut vec = json!(["a", "b", "c"]);
 
-        assert_eq!(Some("b".to_string()), vec.dot_replace("1", "BBB"));
+        assert_eq!(Some("b".to_string()), vec.dot_replace("1", "BBB").unwrap());
 
         let mut vec = json!([[["a"], "b"], "c"]);
-        assert_eq!(Some("a".to_string()), vec.dot_replace("0.0.0", "AAA"));
+        assert_eq!(Some("a".to_string()), vec.dot_replace("0.0.0", "AAA").unwrap());
         assert_eq!(json!([[["AAA"], "b"], "c"]), vec);
     }
 
     #[test]
     fn set_map() {
         let mut vec = json!({});
-        vec.dot_set("foo", "bar");
+        vec.dot_set("foo", "bar").unwrap();
         assert_eq!(json!({"foo": "bar"}), vec);
 
         let mut vec = json!({});
-        vec.dot_set("foo.bar.baz", "binx");
+        vec.dot_set("foo.bar.baz", "binx").unwrap();
         assert_eq!(json!({"foo": {"bar": {"baz": "binx"}}}), vec);
 
-        vec.dot_set("foo.bar.abc.0", "aaa");
+        vec.dot_set("foo.bar.abc.0", "aaa").unwrap();
         assert_eq!(json!({"foo": {"bar": {"baz": "binx","abc": ["aaa"]}}}), vec);
     }
 
     #[test]
-    #[should_panic]
-    fn set_map_panic_bad_index() {
-        let mut vec = json!({});
-        vec.dot_set("0", "first");
+    fn set_map_err_bad_index() {
+        let mut map = json!({});
+        assert!(map.dot_set("0", "first").is_ok());
+        assert_eq!(json!({"0": "first"}), map);
+
+        assert_eq!(Some("first".to_string()), map.dot_get("0").unwrap());
     }
 
     #[test]
     fn get_map() {
         let vec = json!({"one": "two"});
-        assert_eq!(Some("two".to_string()), vec.dot_get("one"));
+        assert_eq!(Some("two".to_string()), vec.dot_get("one").unwrap());
 
         let vec = json!({"one": {"two": "three"}});
-        assert_eq!(Some("three".to_string()), vec.dot_get("one.two"));
+        assert_eq!(Some("three".to_string()), vec.dot_get("one.two").unwrap());
 
         let vec = json!({"one": "two"});
-        assert_eq!(None, vec.dot_get::<Value>("xxx"));
+        assert_eq!(None, vec.dot_get::<Value>("xxx").unwrap());
     }
 
     #[test]
     fn map_escaped_keys() {
         let mut map = json!({});
-        map.dot_set("#0.#1", 123);
+        map.dot_set("\\0.\\1", 123).unwrap();
         assert_eq!(json!({"0": {"1": 123}}), map);
-        map.dot_set("#0.#2", 456);
+        map.dot_set("\\0.\\2", 456).unwrap();
 
-        assert_eq!(Some(123), map.dot_get("#0.#1"));
-        assert_eq!(Some(123), map.dot_take("#0.#1"));
+        assert_eq!(Some(123), map.dot_get("\\0.\\1").unwrap());
+        assert_eq!(Some(123), map.dot_take("\\0.\\1").unwrap());
         assert_eq!(json!({"0": {"2": 456}}), map);
-        assert_eq!(true, map.dot_remove("#0.#2"));
+        assert!(map.dot_remove("\\0.\\2").is_ok());
+
+        map.dot_set("\\0.\\\\2", 456).unwrap();
+        assert_eq!(json!({"0": {"\\2": 456}}), map);
     }
 
     #[test]
     fn remove_from_map() {
         let mut vec = json!({"one": "two", "x": "y"});
-        assert_eq!(true, vec.dot_remove("one"));
+        assert!(vec.dot_remove("one").is_ok());
         assert_eq!(json!({"x": "y"}), vec);
     }
 
     #[test]
     fn take_from_map() {
         let mut vec = json!({"one": "two", "x": "y"});
-        assert_eq!(Some("two".to_string()), vec.dot_take("one"));
+        assert_eq!(Some("two".to_string()), vec.dot_take("one").unwrap());
         assert_eq!(json!({"x": "y"}), vec);
     }
 
     #[test]
     fn replace_in_map() {
         let mut vec = json!({"one": "two", "x": "y"});
-        assert_eq!(Some("two".to_string()), vec.dot_replace("one", "fff"));
+        assert_eq!(Some("two".to_string()), vec.dot_replace("one", "fff").unwrap());
         assert_eq!(json!({"one": "fff", "x": "y"}), vec);
 
         // replace value for string
         let mut vec = json!({"one": "two", "x": {"bbb": "y"}});
-        assert_eq!(Some("y".to_string()), vec.dot_replace("x.bbb", "mm"));
+        assert_eq!(Some("y".to_string()), vec.dot_replace("x.bbb", "mm").unwrap());
         assert_eq!(
             Some(json!({"bbb": "mm"})),
-            vec.dot_replace("x", "betelgeuze")
+            vec.dot_replace("x", "betelgeuze").unwrap()
         );
         assert_eq!(json!({"one": "two", "x": "betelgeuze"}), vec);
 
@@ -827,9 +1023,53 @@ mod tests {
         let mut vec = json!({"one": "two", "x": {"bbb": ["y"]}});
         assert_eq!(
             Some("y".to_string()),
-            vec.dot_replace("x.bbb.0", "betelgeuze")
+            vec.dot_replace("x.bbb.0", "betelgeuze").unwrap()
         );
         assert_eq!(json!({"one": "two", "x": {"bbb": ["betelgeuze"]}}), vec);
+    }
+
+    #[test]
+    fn value_get_mut() {
+        // Borrow Null as mutable
+        let mut obj = Value::Null;
+        let m = obj.dot_get_mut("").unwrap();
+        std::mem::replace(m, Value::from(123));
+        assert_eq!(Value::from(123), obj);
+
+        // Create a parents path
+        let mut obj = Value::Null;
+        let _ = obj.dot_get_mut("foo.0").unwrap();
+        assert_eq!(json!({"foo": [null]}), obj);
+    }
+
+    #[test]
+    fn map_get_mut() {
+        // Spawn empty element
+        let mut obj = serde_json::Map::<String, Value>::new();
+        let _ = obj.dot_get_mut("foo").unwrap();
+        assert_eq!(json!({"foo": null}), Value::Object(obj));
+
+        // Spawn a subtree
+        let mut obj = serde_json::Map::<String, Value>::new();
+        let m = obj.dot_get_mut("foo.bar.baz").unwrap();
+        m.dot_set("dog", "cat").unwrap();
+
+        assert_eq!(json!({"foo": {"bar": {"baz": {"dog": "cat"}}}}), Value::Object(obj));
+    }
+
+    #[test]
+    fn vec_get_mut() {
+        // Spawn empty element
+        let mut obj = Vec::<Value>::new();
+        let _ = obj.dot_get_mut(">").unwrap();
+        assert_eq!(json!([null]), Value::Array(obj));
+
+        // Spawn a subtree
+        let mut obj = Vec::<Value>::new();
+        let m = obj.dot_get_mut("0.foo.bar").unwrap();
+        m.dot_set("dog", "cat").unwrap();
+
+        assert_eq!(json!([{"foo": {"bar": {"dog": "cat"}}}]), Value::Array(obj));
     }
 
     #[test]
@@ -837,7 +1077,7 @@ mod tests {
         let mut stamps = Value::Null;
         // null will become Value::Array(vec![])
 
-        #[derive(Serialize,Deserialize,PartialEq,Default)]
+        #[derive(Serialize, Deserialize, PartialEq, Default)]
         struct Stamp {
             country: String,
             year: u32,
@@ -851,29 +1091,29 @@ mod tests {
             "year": 1847,
             "color": "orange",
             "face value": "1 penny"
-        }));
+        })).unwrap();
 
         // append
-        stamps.dot_set(">", Stamp {
+        stamps.dot_set("+", Stamp {
             country: "British Mauritius".to_string(),
             year: 1847,
             color: "blue".to_string(),
             face_value: "2 pence".to_string(),
-        });
+        }).unwrap();
 
-        assert_eq!("orange", stamps.dot_get::<String>("0.color").unwrap());
-        assert_eq!("blue", stamps.dot_get::<String>("1.color").unwrap());
+        assert_eq!("orange", stamps.dot_get::<String>("0.color").unwrap().unwrap());
+        assert_eq!("blue", stamps.dot_get::<String>("1.color").unwrap().unwrap());
 
-        assert_eq!(1847, stamps.dot_get::<Stamp>("1").unwrap().year);
+        assert_eq!(1847, stamps.dot_get::<Stamp>("1").unwrap().unwrap().year);
 
         // Remove the first stamp's "face value" attribute
-        assert_eq!(Some("1 penny".to_string()), stamps.dot_get("0.face value"));
-        stamps.dot_remove("0.face value");
-        assert_eq!(Option::<Value>::None, stamps.dot_get("0.face value"));
+        assert_eq!(Some("1 penny".to_string()), stamps.dot_get("0.face value").unwrap());
+        stamps.dot_remove("0.face value").unwrap();
+        assert_eq!(Option::<Value>::None, stamps.dot_get("0.face value").unwrap());
 
         // change the second stamp's year
-        let old_year : u32 = stamps.dot_replace("1.year", 1850).unwrap();
+        let old_year: u32 = stamps.dot_replace("1.year", 1850).unwrap().unwrap();
         assert_eq!(1847, old_year);
-        assert_eq!(1850, stamps.dot_get::<u32>("1.year").unwrap());
+        assert_eq!(1850, stamps.dot_get::<u32>("1.year").unwrap().unwrap());
     }
 }
