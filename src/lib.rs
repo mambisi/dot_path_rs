@@ -92,8 +92,8 @@ pub trait DotPaths {
     /// - `>` ... last element of an array
     /// - `<` ... first element of an array (same as `0`)
     fn dot_get<T>(&self, path: &str) -> Result<Option<T>>
-    where
-        T: DeserializeOwned;
+        where
+            T: DeserializeOwned;
 
     /// Get an item by path, or a default value if it does not exist.
     ///
@@ -101,8 +101,8 @@ pub trait DotPaths {
     ///
     /// See `dot_get()` for more details.
     fn dot_get_or<T>(&self, path: &str, def: T) -> Result<T>
-    where
-        T: DeserializeOwned,
+        where
+            T: DeserializeOwned,
     {
         self.dot_get(path).map(|o| o.unwrap_or(def))
     }
@@ -113,8 +113,8 @@ pub trait DotPaths {
     ///
     /// See `dot_get()` for more details.
     fn dot_get_or_default<T>(&self, path: &str) -> Result<T>
-    where
-        T: DeserializeOwned + Default,
+        where
+            T: DeserializeOwned + Default,
     {
         self.dot_get_or(path, T::default())
     }
@@ -144,8 +144,8 @@ pub trait DotPaths {
     /// - `>` ... last element of an array
     /// - `<` ... first element of an array (same as `0`)
     fn dot_set<T>(&mut self, path: &str, value: T) -> Result<()>
-    where
-        T: Serialize,
+        where
+            T: Serialize,
     {
         // This is a default implementation.
         // Vec uses a custom implementation to support the special syntax.
@@ -163,9 +163,9 @@ pub trait DotPaths {
     /// - `>` ... last element of an array
     /// - `<` ... first element of an array (same as `0`)
     fn dot_replace<NEW, OLD>(&mut self, path: &str, value: NEW) -> Result<Option<OLD>>
-    where
-        NEW: Serialize,
-        OLD: DeserializeOwned;
+        where
+            NEW: Serialize,
+            OLD: DeserializeOwned;
 
     /// Get an item using a path, removing it from the object.
     ///
@@ -178,8 +178,8 @@ pub trait DotPaths {
     /// - `>` ... last element of an array
     /// - `<` ... first element of an array (same as `0`)
     fn dot_take<T>(&mut self, path: &str) -> Result<Option<T>>
-    where
-        T: DeserializeOwned;
+        where
+            T: DeserializeOwned;
 
     /// Remove and drop an item matching a key.
     /// Returns true if any item was removed.
@@ -223,8 +223,8 @@ fn path_split(path: &str) -> (String, Option<&str>) {
 
 impl DotPaths for serde_json::Value {
     fn dot_get<T>(&self, path: &str) -> Result<Option<T>>
-    where
-        T: DeserializeOwned,
+        where
+            T: DeserializeOwned,
     {
         match self {
             Value::Array(vec) => vec.dot_get(path),
@@ -266,9 +266,9 @@ impl DotPaths for serde_json::Value {
     }
 
     fn dot_replace<NEW, OLD>(&mut self, path: &str, value: NEW) -> Result<Option<OLD>>
-    where
-        NEW: Serialize,
-        OLD: DeserializeOwned,
+        where
+            NEW: Serialize,
+            OLD: DeserializeOwned,
     {
         match self {
             Value::Array(vec) => vec.dot_replace(path, value),
@@ -292,8 +292,8 @@ impl DotPaths for serde_json::Value {
     }
 
     fn dot_take<T>(&mut self, path: &str) -> Result<Option<T>>
-    where
-        T: DeserializeOwned,
+        where
+            T: DeserializeOwned,
     {
         match self {
             Value::Array(vec) => vec.dot_take(path),
@@ -315,8 +315,8 @@ impl DotPaths for serde_json::Value {
     }
 
     fn dot_set<T>(&mut self, path: &str, value: T) -> Result<()>
-    where
-        T: Serialize,
+        where
+            T: Serialize,
     {
         match self {
             // Special case for Vec, which implements additional path symbols
@@ -333,8 +333,8 @@ impl DotPaths for serde_json::Value {
 ///
 /// Builds the parent path to a non-existent key in set-type operations.
 fn new_by_path_root<T>(path: &str, value: T) -> Result<Value>
-where
-    T: Serialize,
+    where
+        T: Serialize,
 {
     if path.is_empty() {
         return Ok(serde_json::to_value(value)?);
@@ -357,8 +357,8 @@ where
 
 impl DotPaths for serde_json::Map<String, serde_json::Value> {
     fn dot_get<T>(&self, path: &str) -> Result<Option<T>>
-    where
-        T: DeserializeOwned,
+        where
+            T: DeserializeOwned,
     {
         let (my, sub) = path_split(path);
 
@@ -413,9 +413,9 @@ impl DotPaths for serde_json::Map<String, serde_json::Value> {
     }
 
     fn dot_replace<NEW, OLD>(&mut self, path: &str, value: NEW) -> Result<Option<OLD>>
-    where
-        NEW: Serialize,
-        OLD: DeserializeOwned,
+        where
+            NEW: Serialize,
+            OLD: DeserializeOwned,
     {
         let (my, sub) = path_split(path);
 
@@ -444,8 +444,8 @@ impl DotPaths for serde_json::Map<String, serde_json::Value> {
     }
 
     fn dot_take<T>(&mut self, path: &str) -> Result<Option<T>>
-    where
-        T: DeserializeOwned,
+        where
+            T: DeserializeOwned,
     {
         let (my, sub) = path_split(path);
 
@@ -471,8 +471,8 @@ impl DotPaths for serde_json::Map<String, serde_json::Value> {
 
 impl DotPaths for Vec<serde_json::Value> {
     fn dot_get<T>(&self, path: &str) -> Result<Option<T>>
-    where
-        T: DeserializeOwned,
+        where
+            T: DeserializeOwned,
     {
         let (my, sub) = path_split(path);
 
@@ -558,8 +558,8 @@ impl DotPaths for Vec<serde_json::Value> {
 
     #[allow(clippy::collapsible_if)]
     fn dot_set<T>(&mut self, path: &str, value: T) -> Result<()>
-    where
-        T: Serialize,
+        where
+            T: Serialize,
     {
         // implemented separately from replace because of the special index handling
         let (my_s, sub) = path_split(path);
@@ -638,9 +638,9 @@ impl DotPaths for Vec<serde_json::Value> {
     }
 
     fn dot_replace<T, U>(&mut self, path: &str, value: T) -> Result<Option<U>>
-    where
-        T: Serialize,
-        U: DeserializeOwned,
+        where
+            T: Serialize,
+            U: DeserializeOwned,
     {
         let (my, sub) = path_split(path);
 
@@ -657,10 +657,20 @@ impl DotPaths for Vec<serde_json::Value> {
                 }
             }
             "<" => 0,
+            "+" | ">>" => {
+                let new = serde_json::to_value(value)?;
+                self.push(new);
+                return Ok(None);
+            }
+            "-" | "<<" => {
+                let new = serde_json::to_value(value)?;
+                self.insert(0, new);
+                return Ok(None);
+            }
             _ => my.parse().map_err(|_| InvalidKey(my))?,
         };
 
-        if index >= self.len() {
+        if index > self.len() {
             // appending is not supported in replace
             return Err(BadIndex(index));
         }
@@ -682,8 +692,8 @@ impl DotPaths for Vec<serde_json::Value> {
     }
 
     fn dot_take<T>(&mut self, path: &str) -> Result<Option<T>>
-    where
-        T: DeserializeOwned,
+        where
+            T: DeserializeOwned,
     {
         let (my, sub) = path_split(path);
 
@@ -836,6 +846,21 @@ mod tests {
         assert_eq!(json!([[["first"]]]), vec);
         vec.dot_set(">>.<<.>>", "second").unwrap();
         assert_eq!(json!([[["first"]], [["second"]]]), vec);
+    }
+
+    #[test]
+    fn inner_array() {
+        let mut test_inner_array = Value::Null;
+        test_inner_array.dot_set("name", Value::String(String::from("Google")));
+        test_inner_array.dot_set("todos.+", Value::String(String::from("Go to Class")));
+        test_inner_array.dot_set("todos.+", Value::String(String::from("Maker"))).unwrap();
+        test_inner_array.dot_set("todos.-", Value::String(String::from("Fish"))).unwrap();
+
+        assert_eq!(test_inner_array, json!({"name" : "Google", "todos" : ["Fish","Go to Class","Maker"] }));
+
+        test_inner_array.dot_set("todos.<", Value::String(String::from("Joke"))).unwrap();
+
+        assert_eq!(test_inner_array, json!({"name" : "Google", "todos" : ["Joke","Go to Class","Maker"] }));
     }
 
     #[test]
